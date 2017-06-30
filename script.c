@@ -301,16 +301,19 @@ void prepare_script_env(struct openconnect_info *vpninfo)
 		}
 		list = malloc(len);
 		if (list) {
-			char *p = list;
+			/* position at last element before NULL */
+			char *p = list+len-1;
 
 			dns = vpninfo->ip_info.split_dns;
 			while (1) {
-				strcpy(p, dns->route);
-				p += strlen(p);
+				int route_len = strlen(dns->route);
+				/* back up pointer to make room to copy */
+				p -= route_len;
+				strncpy(p, dns->route, route_len);
 				dns = dns->next;
 				if (!dns)
 					break;
-				*(p++) = ',';
+				*(--p) = ',';
 			}
 			script_setenv(vpninfo, "CISCO_SPLIT_DNS", list, 0);
 			free(list);
