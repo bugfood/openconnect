@@ -23,8 +23,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <netinet/in.h>
+#endif
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include "win32-ipicmp.h"
+#else
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#endif
 
 #include "openconnect-internal.h"
 #include "lzo.h"
@@ -248,22 +259,24 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 	int work_done = 0;
 	int ret;
 
+	/* Some servers send us packets that are larger than negotiated
+	   MTU, or lack the ability to negotiate MTU (see gpst.c). We
+	   reserve some extra space to handle that */
+	int receive_mtu = MAX(2048, vpninfo->ip_info.mtu + 256);
+
 	if (vpninfo->dtls_state == DTLS_SLEEPING) {
-		int when = vpninfo->new_dtls_started + vpninfo->dtls_attempt_period - time(NULL);
-		if (when <= 0 || vpninfo->dtls_need_reconnect) {
+		if (ka_check_deadline(timeout, time(NULL), vpninfo->new_dtls_started + vpninfo->dtls_attempt_period)
+		    || vpninfo->dtls_need_reconnect) {
 			vpn_progress(vpninfo, PRG_DEBUG, _("Send ESP probes\n"));
 			if (vpninfo->proto->udp_send_probes)
 				vpninfo->proto->udp_send_probes(vpninfo);
-			when = vpninfo->dtls_attempt_period;
 		}
-		if (*timeout > when * 1000)
-			*timeout = when * 1000;
 	}
 	if (vpninfo->dtls_fd == -1)
 		return 0;
 
 	while (1) {
-		int len = vpninfo->ip_info.mtu + vpninfo->pkt_trailer;
+		int len = receive_mtu + vpninfo->pkt_trailer;
 		int i;
 		struct pkt *pkt;
 
@@ -283,6 +296,7 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 			     len);
 		work_done = 1;
 
+		/* both supported algos (SHA1 and MD5) have 12-byte MAC lengths (RFC2403 and RFC2404) */
 		if (len <= sizeof(pkt->esp) + 12)
 			continue;
 
@@ -295,7 +309,7 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 		} else if (pkt->esp.spi == old_esp->spi &&
 			   ntohl(pkt->esp.seq) + esp->seq < vpninfo->old_esp_maxseq) {
 			vpn_progress(vpninfo, PRG_TRACE,
-				     _("Consider SPI 0x%x, seq %u against outgoing ESP setup\n"),
+				     _("Received ESP packet from old SPI 0x%x, seq %u\n"),
 				     (unsigned)ntohl(old_esp->spi), (unsigned)ntohl(pkt->esp.seq));
 			if (decrypt_esp_packet(vpninfo, old_esp, pkt))
 				continue;
@@ -306,6 +320,11 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 			continue;
 		}
 
+		/* Possible values of the Next Header field are:
+		   0x04: IP[v4]-in-IP
+		   0x05: supposed to mean Internet Stream Protocol
+		         (XXX: but used for LZO compressed packets by Juniper)
+		   0x29: IPv6 encapsulation */
 		if (pkt->data[len - 1] != 0x04 && pkt->data[len - 1] != 0x29 &&
 		    pkt->data[len - 1] != 0x05) {
 			vpn_progress(vpninfo, PRG_ERR,
@@ -345,8 +364,8 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 			}
 		}
 		if (pkt->data[len - 1] == 0x05) {
-			struct pkt *newpkt = malloc(sizeof(*pkt) + vpninfo->ip_info.mtu + vpninfo->pkt_trailer);
-			int newlen = vpninfo->ip_info.mtu;
+			struct pkt *newpkt = malloc(sizeof(*pkt) + receive_mtu + vpninfo->pkt_trailer);
+			int newlen = receive_mtu;
 			if (!newpkt) {
 				vpn_progress(vpninfo, PRG_ERR,
 					     _("Failed to allocate memory to decrypt ESP packet\n"));
@@ -359,7 +378,7 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 				free(newpkt);
 				continue;
 			}
-			newpkt->len = vpninfo->ip_info.mtu - newlen;
+			newpkt->len = receive_mtu - newlen;
 			vpn_progress(vpninfo, PRG_TRACE,
 				     _("LZO decompressed %d bytes into %d\n"),
 				     len - 2 - pkt->data[len-2], newpkt->len);
@@ -454,7 +473,8 @@ void esp_close(struct openconnect_info *vpninfo)
 void esp_close_secret(struct openconnect_info *vpninfo)
 {
 	esp_close(vpninfo);
-	vpninfo->dtls_state = DTLS_NOSECRET;
+	if (vpninfo->dtls_state > DTLS_DISABLED)
+		vpninfo->dtls_state = DTLS_NOSECRET;
 }
 
 void esp_shutdown(struct openconnect_info *vpninfo)
