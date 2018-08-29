@@ -262,6 +262,11 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 		buf_append(reqbuf, "X-CSTP-MTU: %d\r\n", mtu);
 	buf_append(reqbuf, "X-CSTP-Address-Type: %s\r\n",
 			       vpninfo->disable_ipv6 ? "IPv4" : "IPv6,IPv4");
+	/* Explicitly request the same IPv4 address on reconnect (or on
+	 * initial connection if specified with the --request-ip option)
+	 */
+	if (old_addr)
+		buf_append(reqbuf, "X-CSTP-Address: %s\r\n", old_addr);
 	if (!vpninfo->disable_ipv6)
 		buf_append(reqbuf, "X-CSTP-Full-IPv6-Capability: true\r\n");
 #ifdef HAVE_DTLS
@@ -577,11 +582,20 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			     mtu);
 	}
 	if (old_addr) {
-		if (strcmp(old_addr, vpninfo->ip_info.addr)) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("Reconnect gave different Legacy IP address (%s != %s)\n"),
-				     vpninfo->ip_info.addr, old_addr);
-			return -EINVAL;
+		/* XXX: if --request-ip option is used, we'll have old_addr!=NULL even on the
+		   first connection attempt, but if old_netmask is also non-NULL then we know
+		   it's a reconnect. */
+		if (vpninfo->ip_info.addr==NULL || strcmp(old_addr, vpninfo->ip_info.addr)) {
+			if (!old_netmask)
+				vpn_progress(vpninfo, PRG_ERR,
+							 _("Legacy IP address %s was requested, but server provided %s\n"),
+							 old_addr, vpninfo->ip_info.addr);
+			else {
+				vpn_progress(vpninfo, PRG_ERR,
+							 _("Reconnect gave different Legacy IP address (%s != %s)\n"),
+							 vpninfo->ip_info.addr, old_addr);
+				return -EINVAL;
+			}
 		}
 	}
 	if (old_netmask) {
@@ -729,7 +743,11 @@ static int cstp_reconnect(struct openconnect_info *vpninfo)
 int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type,
 				unsigned char *buf, int len)
 {
-	struct pkt *new = malloc(sizeof(struct pkt) + vpninfo->ip_info.mtu);
+	/* Some servers send us packets that are larger than
+	   negotiated MTU after decompression. We reserve some extra
+	   space to handle that */
+	int receive_mtu = MAX(16384, vpninfo->ip_info.mtu);
+	struct pkt *new = malloc(sizeof(struct pkt) + receive_mtu);
 	const char *comprname = "";
 
 	if (!new)
@@ -746,7 +764,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 		vpninfo->inflate_strm.avail_in = len - 4;
 
 		vpninfo->inflate_strm.next_out = new->data;
-		vpninfo->inflate_strm.avail_out = vpninfo->ip_info.mtu;
+		vpninfo->inflate_strm.avail_out = receive_mtu;
 		vpninfo->inflate_strm.total_out = 0;
 
 		if (inflate(&vpninfo->inflate_strm, Z_SYNC_FLUSH)) {
@@ -768,7 +786,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 	} else if (compr_type == COMPR_LZS) {
 		comprname = "LZS";
 
-		new->len = lzs_decompress(new->data, vpninfo->ip_info.mtu, buf, len);
+		new->len = lzs_decompress(new->data, receive_mtu, buf, len);
 		if (new->len < 0) {
 			len = new->len;
 			if (len == 0)
@@ -781,7 +799,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 #ifdef HAVE_LZ4
 	} else if (compr_type == COMPR_LZ4) {
 		comprname = "LZ4";
-		new->len = LZ4_decompress_safe((void *)buf, (void *)new->data, len, vpninfo->ip_info.mtu);
+		new->len = LZ4_decompress_safe((void *)buf, (void *)new->data, len, receive_mtu);
 		if (new->len <= 0) {
 			len = new->len;
 			if (len == 0)
@@ -882,18 +900,21 @@ int cstp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 	   and add POLLOUT. As it is, though, it'll just chew CPU time in that
 	   fairly unlikely situation, until the write backlog clears. */
 	while (1) {
-		int len = MAX(16384, vpninfo->deflate_pkt_size ? : vpninfo->ip_info.mtu);
-		int payload_len;
+		/* Some servers send us packets that are larger than
+		   negotiated MTU. We reserve some extra space to
+		   handle that */
+		int receive_mtu = MAX(16384, vpninfo->deflate_pkt_size ? : vpninfo->ip_info.mtu);
+		int len, payload_len;
 
 		if (!vpninfo->cstp_pkt) {
-			vpninfo->cstp_pkt = malloc(sizeof(struct pkt) + len);
+			vpninfo->cstp_pkt = malloc(sizeof(struct pkt) + receive_mtu);
 			if (!vpninfo->cstp_pkt) {
 				vpn_progress(vpninfo, PRG_ERR, _("Allocation failed\n"));
 				break;
 			}
 		}
 
-		len = ssl_nonblock_read(vpninfo, vpninfo->cstp_pkt->cstp.hdr, len + 8);
+		len = ssl_nonblock_read(vpninfo, vpninfo->cstp_pkt->cstp.hdr, receive_mtu + 8);
 		if (!len)
 			break;
 		if (len < 0)

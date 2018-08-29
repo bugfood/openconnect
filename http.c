@@ -54,6 +54,19 @@ void buf_append_urlencoded(struct oc_text_buf *buf, const char *str)
 	}
 }
 
+void buf_append_xmlescaped(struct oc_text_buf *buf, const char *str)
+{
+	while (str && *str) {
+		unsigned char c = *str;
+		if (c=='<' || c=='>' || c=='&' || c=='"' || c=='\'')
+			buf_append(buf, "&#x%02x;", c);
+		else
+			buf_append_bytes(buf, str, 1);
+
+		str++;
+	}
+}
+
 void buf_append_hex(struct oc_text_buf *buf, const void *str, unsigned len)
 {
 	const unsigned char *data = str;
@@ -818,7 +831,7 @@ int do_https_request(struct openconnect_info *vpninfo, const char *method,
 	int result;
 	int rq_retry;
 	int rlen, pad;
-	int auth = 0;
+	int i, auth = 0;
 	int max_redirects = 10;
 
 	if (request_body_type && buf_error(request_body))
@@ -913,17 +926,22 @@ int do_https_request(struct openconnect_info *vpninfo, const char *method,
 	if (vpninfo->dump_http_traffic)
 		dump_buf(vpninfo, '>', buf->data);
 
-	result = vpninfo->ssl_write(vpninfo, buf->data, buf->pos);
-	if (rq_retry && result < 0) {
-		openconnect_close_https(vpninfo, 0);
-		goto retry;
+	for (i = 0; i < buf->pos; i += 16384) {
+		result = vpninfo->ssl_write(vpninfo, buf->data + i, MIN(buf->pos - i, 16384) );
+		if (result < 0) {
+			if (rq_retry) {
+				/* Retry if we failed to send the request on
+				   an already-open connection */
+				openconnect_close_https(vpninfo, 0);
+				goto retry;
+			}
+			/* We'll already have complained about whatever offended us */
+			goto out;
+		}
 	}
-	if (result < 0)
-		goto out;
 
 	result = process_http_response(vpninfo, 0, http_auth_hdrs, buf);
 	if (result < 0) {
-		/* We'll already have complained about whatever offended us */
 		goto out;
 	}
 	if (vpninfo->dump_http_traffic && buf->pos)
@@ -1467,7 +1485,7 @@ void http_common_headers(struct openconnect_info *vpninfo, struct oc_text_buf *b
 		buf_append(buf, "Host: %s\r\n", vpninfo->hostname);
 	else
 		buf_append(buf, "Host: %s:%d\r\n", vpninfo->hostname, vpninfo->port);
-	buf_append(buf, "User-Agent: %s\r\n", vpninfo->useragent);
+	buf_append(buf, "User-Agent: %s\r\n", vpninfo->proto->override_useragent ? : vpninfo->useragent);
 
 	if (vpninfo->cookies) {
 		buf_append(buf, "Cookie: ");

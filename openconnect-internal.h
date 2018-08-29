@@ -122,6 +122,9 @@
 #ifndef MAX
 #define MAX(x,y) ((x)>(y))?(x):(y)
 #endif
+#ifndef MIN
+#define MIN(x,y) ((x)<(y))?(x):(y)
+#endif
 /****************************************************************************/
 
 struct pkt {
@@ -171,10 +174,11 @@ struct pkt {
 #define COMPR_DEFLATE	(1<<0)
 #define COMPR_LZS	(1<<1)
 #define COMPR_LZ4	(1<<2)
-#define COMPR_MAX	COMPR_LZ4
+#define COMPR_LZO	(1<<3)
+#define COMPR_MAX	COMPR_LZO
 
 #ifdef HAVE_LZ4
-#define COMPR_STATELESS	(COMPR_LZS | COMPR_LZ4)
+#define COMPR_STATELESS	(COMPR_LZS | COMPR_LZ4 | COMPR_LZO)
 #else
 #define COMPR_STATELESS	(COMPR_LZS)
 #endif
@@ -260,6 +264,8 @@ struct vpn_proto {
 	const char *name;
 	const char *pretty_name;
 	const char *description;
+	const char *udp_protocol;
+	const char *override_useragent;
 	unsigned int flags;
 	int (*vpn_close_session)(struct openconnect_info *vpninfo, const char *reason);
 
@@ -375,7 +381,7 @@ struct openconnect_info {
 	struct esp esp_out;
 	int enc_key_len;
 	int hmac_key_len;
-	in_addr_t esp_magic; /* GlobalProtect magic ping address (network-endian) */
+	uint32_t esp_magic;  /* GlobalProtect magic ping address (network-endian) */
 
 	int tncc_fd; /* For Juniper TNCC */
 	const char *csd_xmltag;
@@ -513,15 +519,6 @@ struct openconnect_info {
 	TSS_HPOLICY srk_policy;
 	TSS_HKEY tpm_key;
 	TSS_HPOLICY tpm_key_policy;
-#endif
-#ifndef HAVE_GNUTLS_CERTIFICATE_SET_KEY
-#ifdef HAVE_P11KIT
-	gnutls_pkcs11_privkey_t my_p11key;
-#endif
-	gnutls_privkey_t my_pkey;
-	gnutls_x509_crt_t *my_certs;
-	uint8_t *free_my_certs;
-	unsigned int nr_my_certs;
 #endif
 #endif /* OPENCONNECT_GNUTLS */
 	struct pin_cache *pin_cache;
@@ -970,6 +967,7 @@ int tun_mainloop(struct openconnect_info *vpninfo, int *timeout);
 int queue_new_packet(struct pkt_q *q, void *buf, int len);
 int keepalive_action(struct keepalive_info *ka, int *timeout);
 int ka_stalled_action(struct keepalive_info *ka, int *timeout);
+int ka_check_deadline(int *timeout, time_t now, time_t due);
 
 /* xml.c */
 ssize_t read_file_into_string(struct openconnect_info *vpninfo, const char *fname,
@@ -1043,6 +1041,7 @@ int get_utf8char(const char **utf8);
 void buf_append_from_utf16le(struct oc_text_buf *buf, const void *utf16);
 void buf_truncate(struct oc_text_buf *buf);
 void buf_append_urlencoded(struct oc_text_buf *buf, const char *str);
+void buf_append_xmlescaped(struct oc_text_buf *buf, const char *str);
 int buf_error(struct oc_text_buf *buf);
 int buf_free(struct oc_text_buf *buf);
 char *openconnect_create_useragent(const char *base);

@@ -47,7 +47,6 @@ void oncp_common_headers(struct openconnect_info *vpninfo, struct oc_text_buf *b
 {
 	http_common_headers(vpninfo, buf);
 
-	buf_append(buf, "Connection: close\r\n");
 //	buf_append(buf, "Content-Length: 256\r\n");
 	buf_append(buf, "NCP-Version: 3\r\n");
 //	buf_append(buf, "Accept-Encoding: gzip\r\n");
@@ -77,7 +76,7 @@ static int oncp_can_gen_tokencode(struct openconnect_info *vpninfo,
 
 	if (strcmp(form->auth_id, "frmDefender") &&
 	    strcmp(form->auth_id, "frmNextToken") &&
-	    strcmp(form->auth_id, "ftmTotpToken"))
+	    strcmp(form->auth_id, "frmTotpToken"))
 		return -EINVAL;
 
 	return can_gen_tokencode(vpninfo, form, opt);
@@ -116,6 +115,13 @@ static int parse_input_node(struct openconnect_info *vpninfo, struct oc_auth_for
 		if (!oncp_can_gen_tokencode(vpninfo, form, opt))
 			opt->type = OC_FORM_OPT_TOKEN;
 	} else if (!strcasecmp(type, "text")) {
+		opt->type = OC_FORM_OPT_TEXT;
+		xmlnode_get_prop(node, "name", &opt->name);
+		if (asprintf(&opt->label, "%s:", opt->name) == -1) {
+			ret = -ENOMEM;
+			goto out;
+		}
+	} else if (!strcasecmp(type, "username")) {
 		opt->type = OC_FORM_OPT_TEXT;
 		xmlnode_get_prop(node, "name", &opt->name);
 		if (asprintf(&opt->label, "%s:", opt->name) == -1) {
